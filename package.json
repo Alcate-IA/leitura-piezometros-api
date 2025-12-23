@@ -1,0 +1,28 @@
+{
+  "name": "leitura-piezometros-api",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Alcate-IA/leitura-piezometros-api.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Alcate-IA/leitura-piezometros-api/issues"
+  },
+  "homepage": "https://github.com/Alcate-IA/leitura-piezometros-api#readme",
+  "dependencies": {
+    "axios": "^1.13.2",
+    "dotenv": "^17.2.3",
+    "fs": "^0.0.1-security",
+    "mqtt": "^5.14.1",
+    "path": "^0.12.7"
+  }
+}
