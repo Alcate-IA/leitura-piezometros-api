@@ -28,3 +28,12 @@ VOLUME ["/fotos-inspecoes"]
 
 # Comando para iniciar a aplicação
 CMD [ "node", "index.js" ]
+
+
+
+# docker run -d \
+#   --name leitura-piezometros-ap \
+#   -p 3000:3000 \
+#   -v /home/usuario/fotos-inspecoes:/fotos-inspecoes \
+#   --env-file .env \
+#   leitura-piezometros-apo
