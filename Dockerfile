@@ -1,29 +1,30 @@
-# Usa uma imagem leve do Node
+# Usa uma imagem leve do Node.js
 FROM node:18-alpine
 
-# Define ambiente de produção
+# Define que a aplicação rodará em modo de produção
 ENV NODE_ENV=production
 
-# Diretório de trabalho
+# Define o diretório de trabalho principal para o código
 WORKDIR /usr/src/app
 
-# Copia arquivos de dependências
+# Copia apenas os arquivos de dependências para otimizar o cache das camadas
 COPY package*.json ./
 
-# Instala apenas o necessário para produção
+# Instala apenas as dependências de produção (ignora nodemon, etc)
 RUN npm install --omit=dev
 
-# Copia o código da API
+# Copia o restante dos arquivos do projeto (index.js, etc)
 COPY . .
 
-# Cria a pasta de fotos interna
-RUN mkdir -p /imagens_inspecoes
+# --- PADRONIZAÇÃO DA PASTA DE FOTOS ---
+# 1. Cria a pasta na raiz do container para facilitar o mapeamento
+RUN mkdir -p /fotos-inspecoes
 
-# Define a variável de ambiente para o código usar essa pasta
-ENV FOTOS_PATH=/imagens_inspecoes
+# 2. Define a variável de ambiente que o seu index.js irá ler
+ENV FOTOS_PATH=/fotos-inspecoes
 
-# Expõe o volume para persistência no host
-VOLUME ["/imagens_inspecoes"]
+# 3. Define a pasta como um Volume para que as fotos persistam no Host
+VOLUME ["/fotos-inspecoes"]
 
-# Comando de inicialização
+# Comando para iniciar a aplicação
 CMD [ "node", "index.js" ]
