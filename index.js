@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const Firebird = require('node-firebird');
 const iconv = require('iconv-lite'); 
+const { Pool } = require('pg');
 
 // --- CONFIGURAÇÕES ---
 const WEBHOOK_URL = process.env.WEBHOOK_URL || 'https://n8n.alcateia-ia.com/webhook-test/leituras';
@@ -12,18 +13,29 @@ const FOTOS_PATH = process.env.FOTOS_PATH || path.join(__dirname, 'fotos-inspeco
 const MQTT_TOPIC_BASE = process.env.MQTT_TOPIC_RESULTADO || 'alcateia/teste/riodeserto/lista/piezometro'; 
 const INTERVALO_CONSULTA = process.env.INTERVALO_CONSULTA_MS || 60000;
 
-// Configuração do Banco
-const dbOptions = {
-    host: process.env.DB_HOST || '192.9.200.7',
-    port: process.env.DB_PORT || 3050,
-    database: process.env.DB_DATABASE || '/data1/dataib/zeus20.fdb',
-    user: process.env.DB_USER || 'ALCATEIA',
-    password: process.env.DB_PASSWORD || '8D5Z9s2F',
+// Configuração Firebird
+const dbOptionsFirebird = {
+    host: process.env.DB_HOST,
+    port: process.env.DB_PORT,
+    database: process.env.DB_DATABASE,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
     lowercase_keys: false, 
     role: null,            
     pageSize: 4096,
-    charset: 'NONE' // Mantemos NONE para receber o Buffer do CAST
+    charset: 'NONE'
 };
+
+// Configuração PostgreSQL
+const pgPool = new Pool({
+    host: process.env.PG_HOST,
+    port: process.env.PG_PORT,
+    database: process.env.PG_DATABASE,
+    user: process.env.PG_USER,
+    password: process.env.PG_PASSWORD,
+    max: 10,
+    idleTimeoutMillis: 30000
+});
 
 // Configuração MQTT
 const mqttOptions = {
@@ -36,20 +48,15 @@ const mqttOptions = {
     rejectUnauthorized: false 
 };
 
-// --- FUNÇÃO DE DECODIFICAÇÃO ---
+// --- FUNÇÃO AUXILIAR DECODIFICAÇÃO ---
 function decodificarBuffer(valor) {
     if (!valor) return null;
-
-    if (Buffer.isBuffer(valor)) {
-        return iconv.decode(valor, 'win1252').trim(); 
-    }
-    
+    if (Buffer.isBuffer(valor)) return iconv.decode(valor, 'win1252').trim();
     if (typeof valor === 'string') return valor.trim();
-    
     return valor;
 }
 
-// --- CONFIGURAÇÕES BÁSICAS ---
+// --- SETUP INICIAL ---
 if (!WEBHOOK_URL) process.exit(1);
 if (!fs.existsSync(FOTOS_PATH)) fs.mkdirSync(FOTOS_PATH, { recursive: true });
 
@@ -65,7 +72,6 @@ client.on('connect', () => {
     client.subscribe('alcateia/teste/riodeserto/emcampo/leituras');
     client.subscribe('alcateia/teste/riodeserto/emcampo/fotos/#');
 
-    // Inicia o ciclo de banco
     setInterval(consultarBancoPublicarMQTT, INTERVALO_CONSULTA);
     consultarBancoPublicarMQTT();
 });
@@ -74,17 +80,9 @@ client.on('message', (topic, message) => {
     if (topic.startsWith(MQTT_TOPIC_BASE)) return;
     try {
         const payload = JSON.parse(message.toString());
-        if (topic.includes('leituras')) { 
-            console.log('📥 Recebido pacote de leituras. Iniciando espera por fotos...');
-            bufferLeituras = payload; 
-            reiniciarTimeout(); 
-        }
-        else if (topic.includes('fotos')) { 
-            const id = topic.split('/').pop();
-            bufferFotos.set(id, payload.fotoBase64); 
-            reiniciarTimeout(); 
-        }
-    } catch (e) { console.error('Erro parse JSON:', e.message); }
+        if (topic.includes('leituras')) { bufferLeituras = payload; reiniciarTimeout(); }
+        else if (topic.includes('fotos')) { bufferFotos.set(topic.split('/').pop(), payload.fotoBase64); reiniciarTimeout(); }
+    } catch (e) {}
 });
 
 // --- LÓGICA CONCILIAÇÃO ---
@@ -96,61 +94,67 @@ function reiniciarTimeout() {
 
 async function processarConciliacao() {
     if (!bufferLeituras) return;
-    
-    console.log('🔄 Processando dados para envio ao Webhook...');
     const campo = bufferLeituras.Campo;
     const categorias = Object.keys(campo);
 
-    categorias.forEach(cat => {
+    for (const cat of categorias) {
         if (campo[cat]) {
-            campo[cat] = campo[cat].map(leitura => {
+            const leiturasAtualizadas = [];
+            
+            for (const leitura of campo[cat]) {
                 let caminhoFotoFinal = null;
+                
+                // Processa a foto se existir
                 if (bufferFotos.has(leitura.id)) {
                     const base64Data = bufferFotos.get(leitura.id);
                     const codigoPonto = leitura.poco ? leitura.poco.split(' - ')[0].trim() : 'NA';
                     const nomeArquivo = `${codigoPonto} - ${leitura.id}.jpg`;
                     const caminhoCompleto = path.join(path.resolve(FOTOS_PATH), nomeArquivo);
+
                     try {
+                        // 1. Salva arquivo no disco
                         fs.writeFileSync(caminhoCompleto, Buffer.from(base64Data, 'base64'));
                         bufferFotos.delete(leitura.id);
                         caminhoFotoFinal = caminhoCompleto;
-                    } catch (err) { console.error('Erro salvar foto:', err.message); }
-                }
-                const infoAdicional = {
-                    comentario: leitura.observacao && leitura.observacao.trim() !== "" ? leitura.observacao : null,
-                    url: caminhoFotoFinal 
-                };
-                return { ...leitura, observacao: JSON.stringify(infoAdicional) };
-            });
-        }
-    });
 
-    try {
-        console.log(`🚀 Enviando POST para: ${WEBHOOK_URL}`);
-        
-        // Envio com axios e melhor tratamento de erro
-        const response = await axios.post(WEBHOOK_URL, bufferLeituras, {
-            headers: { 'Content-Type': 'application/json' }
-        });
-        
-        console.log(`✅ Sucesso! Status: ${response.status}`);
-        bufferLeituras = null;
-    } catch (error) { 
-        if (error.response) {
-            // O servidor respondeu com um status fora de 2xx
-            console.error(`❌ Erro HTTP ${error.response.status} no Webhook:`);
-            console.error(`   Dados:`, JSON.stringify(error.response.data));
-            console.error(`   URL Tentada: ${WEBHOOK_URL}`);
-        } else if (error.request) {
-            // A requisição foi feita mas não houve resposta
-            console.error('❌ Sem resposta do Webhook (Timeout ou Rede indisponível).');
-        } else {
-            console.error('❌ Erro na configuração do Axios:', error.message);
+                        // 2. Salva registro no PostgreSQL
+                        // Definimos 0 se o CD_PIEZOMETRO não vier, para garantir que o registro seja criado
+                        const cdPiezometroSalvar = leitura.CD_PIEZOMETRO ? leitura.CD_PIEZOMETRO : 0;
+
+                        try {
+                            await pgPool.query(
+                                `INSERT INTO TB_FOTO_INSPECAO (CD_PIEZOMETRO, NM_ARQUIVO, CAMINHO_COMPLETO) VALUES ($1, $2, $3)`,
+                                [cdPiezometroSalvar, nomeArquivo, caminhoCompleto]
+                            );
+                            console.log(`💾 Foto registrada no Postgres: ID ${cdPiezometroSalvar} -> ${nomeArquivo}`);
+                        } catch (pgErr) {
+                            console.error('❌ Erro ao salvar no Postgres:', pgErr.message);
+                        }
+
+                    } catch (err) { console.error('❌ Erro ao salvar arquivo físico:', err.message); }
+                }
+
+                // --- ALTERAÇÃO AQUI ---
+                // Não alteramos mais o campo 'observacao'.
+                // Adicionamos o caminho da foto como um campo extra, caso o n8n precise.
+                leiturasAtualizadas.push({ 
+                    ...leitura, 
+                    caminho_foto_servidor: caminhoFotoFinal // Campo novo auxiliar
+                });
+            }
+            
+            campo[cat] = leiturasAtualizadas;
         }
     }
+
+    try {
+        await axios.post(WEBHOOK_URL, bufferLeituras);
+        console.log('🚀 Webhook enviado.');
+        bufferLeituras = null;
+    } catch (error) { console.error('Erro webhook:', error.message); }
 }
 
-// --- BANCO DE DADOS ---
+// --- BANCO DE DADOS (FIREBIRD -> MQTT) ---
 function consultarBancoPublicarMQTT() {
     const sqlQuery = `
         SELECT 
@@ -184,7 +188,7 @@ function consultarBancoPublicarMQTT() {
             P.CD_EMPRESA
     `;
 
-    Firebird.attach(dbOptions, (err, db) => {
+    Firebird.attach(dbOptionsFirebird, (err, db) => {
         if (err) { console.error('Erro Firebird:', err.message); return; }
 
         db.query(sqlQuery, (err, result) => {
