@@ -69,8 +69,8 @@ const client = mqtt.connect(mqttOptions);
 
 client.on('connect', () => {
     console.log('✅ Conectado ao HiveMQ (SSL)');
-    client.subscribe('alcateia/teste/riodeserto/emcampo/leituras');
-    client.subscribe('alcateia/teste/riodeserto/emcampo/fotos/#');
+    client.subscribe(process.env.MQTT_TOPIC_LEITURA || 'alcateia/teste/riodeserto/emcampo/leituras');
+    client.subscribe(process.env.MQTT_TOPIC_FOTO || 'alcateia/teste/riodeserto/emcampo/fotos/#');
 
     setInterval(consultarBancoPublicarMQTT, INTERVALO_CONSULTA);
     consultarBancoPublicarMQTT();
