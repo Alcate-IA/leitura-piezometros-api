@@ -6,12 +6,12 @@ const path = require('path');
 const Firebird = require('node-firebird');
 const iconv = require('iconv-lite'); 
 const { Pool } = require('pg');
+const cron = require('node-cron');
 
 // --- CONFIGURAÇÕES ---
 const WEBHOOK_URL = process.env.WEBHOOK_URL || 'https://n8n.alcateia-ia.com/webhook-test/leituras';
 const FOTOS_PATH = process.env.FOTOS_PATH || path.join(__dirname, 'fotos-inspecoes');
 const MQTT_TOPIC_BASE = process.env.MQTT_TOPIC_RESULTADO || 'alcateia/teste/riodeserto/lista/piezometro'; 
-const INTERVALO_CONSULTA = process.env.INTERVALO_CONSULTA_MS || 60000;
 
 // Configuração Firebird
 const dbOptionsFirebird = {
@@ -33,7 +33,7 @@ const pgPool = new Pool({
     database: process.env.PG_DATABASE,
     user: process.env.PG_USER,
     password: process.env.PG_PASSWORD,
-    max: 10,
+    max: 10, 
     idleTimeoutMillis: 30000
 });
 
@@ -69,11 +69,22 @@ const client = mqtt.connect(mqttOptions);
 
 client.on('connect', () => {
     console.log('✅ Conectado ao HiveMQ (SSL)');
-    client.subscribe(process.env.MQTT_TOPIC_LEITURA || 'alcateia/teste/riodeserto/emcampo/leituras');
-    client.subscribe(process.env.MQTT_TOPIC_FOTO || 'alcateia/teste/riodeserto/emcampo/fotos/#');
+    client.subscribe('alcateia/teste/riodeserto/emcampo/leituras');
+    client.subscribe('alcateia/teste/riodeserto/emcampo/fotos/#');
 
-    setInterval(consultarBancoPublicarMQTT, INTERVALO_CONSULTA);
+    // --- AGENDAMENTO DIÁRIO ---
+    // Executa imediatamente ao iniciar para garantir dados frescos no boot
+    console.log('🚀 Executando carga inicial de dados...');
     consultarBancoPublicarMQTT();
+
+    // Agenda para rodar todo dia às 06:00:00
+    cron.schedule('0 6 * * *', () => {
+        console.log('⏰ Executando agendamento diário (06:00h)...');
+        consultarBancoPublicarMQTT();
+    }, {
+        scheduled: true,
+        timezone: "America/Sao_Paulo" // Ajuste conforme a região do servidor
+    });
 });
 
 client.on('message', (topic, message) => {
@@ -104,45 +115,36 @@ async function processarConciliacao() {
             for (const leitura of campo[cat]) {
                 let caminhoFotoFinal = null;
                 
-                // Processa a foto se existir
                 if (bufferFotos.has(leitura.id)) {
                     const base64Data = bufferFotos.get(leitura.id);
-                    const codigoPonto = leitura.poco ? leitura.poco.split(' - ')[0].trim() : 'NA';
-                    const nomeArquivo = `${codigoPonto} - ${leitura.id}.jpg`;
+                    const nomeArquivo = `${leitura.id}.jpg`;
                     const caminhoCompleto = path.join(path.resolve(FOTOS_PATH), nomeArquivo);
 
                     try {
-                        // 1. Salva arquivo no disco
                         fs.writeFileSync(caminhoCompleto, Buffer.from(base64Data, 'base64'));
                         bufferFotos.delete(leitura.id);
                         caminhoFotoFinal = caminhoCompleto;
 
-                        // 2. Salva registro no PostgreSQL
-                        // Definimos 0 se o CD_PIEZOMETRO não vier, para garantir que o registro seja criado
+                        // Salva no Postgres
                         const cdPiezometroSalvar = leitura.CD_PIEZOMETRO ? leitura.CD_PIEZOMETRO : 0;
-
                         try {
                             await pgPool.query(
                                 `INSERT INTO TB_FOTO_INSPECAO (CD_PIEZOMETRO, NM_ARQUIVO, CAMINHO_COMPLETO) VALUES ($1, $2, $3)`,
                                 [cdPiezometroSalvar, nomeArquivo, caminhoCompleto]
                             );
-                            console.log(`💾 Foto registrada no Postgres: ID ${cdPiezometroSalvar} -> ${nomeArquivo}`);
-                        } catch (pgErr) {
-                            console.error('❌ Erro ao salvar no Postgres:', pgErr.message);
-                        }
+                            console.log(`💾 Foto registrada no Postgres: ID ${cdPiezometroSalvar}`);
+                        } catch (pgErr) { console.error('❌ Erro Postgres:', pgErr.message); }
 
-                    } catch (err) { console.error('❌ Erro ao salvar arquivo físico:', err.message); }
+                    } catch (err) { console.error('❌ Erro arquivo:', err.message); }
                 }
 
-                // --- ALTERAÇÃO AQUI ---
-                // Não alteramos mais o campo 'observacao'.
-                // Adicionamos o caminho da foto como um campo extra, caso o n8n precise.
-                leiturasAtualizadas.push({ 
-                    ...leitura, 
-                    caminho_foto_servidor: caminhoFotoFinal // Campo novo auxiliar
-                });
+                const infoAdicional = {
+                    comentario: leitura.observacao && leitura.observacao.trim() !== "" ? leitura.observacao : null,
+                    url: caminhoFotoFinal 
+                };
+                
+                leiturasAtualizadas.push({ ...leitura, observacao: JSON.stringify(infoAdicional) });
             }
-            
             campo[cat] = leiturasAtualizadas;
         }
     }
@@ -189,12 +191,12 @@ function consultarBancoPublicarMQTT() {
     `;
 
     Firebird.attach(dbOptionsFirebird, (err, db) => {
-        if (err) { console.error('Erro Firebird:', err.message); return; }
+        if (err) { console.error('❌ Erro Firebird:', err.message); return; }
 
         db.query(sqlQuery, (err, result) => {
             db.detach(); 
 
-            if (err) { console.error('Erro Query:', err.message); return; }
+            if (err) { console.error('❌ Erro Query:', err.message); return; }
 
             if (result && result.length > 0) {
                 const dadosAgrupados = {};
