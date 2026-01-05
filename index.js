@@ -9,7 +9,7 @@ const { Pool } = require('pg');
 const cron = require('node-cron');
 
 // --- CONFIGURAÇÕES ---
-const WEBHOOK_URL = process.env.WEBHOOK_URL || 'https://n8n.alcateia-ia.com/webhook-test/leituras';
+const WEBHOOK_URL = process.env.WEBHOOK_URL || 'http://192.168.100.95:5678/webhook/leituras-aplicativo';
 const FOTOS_PATH = process.env.FOTOS_PATH || path.join(__dirname, 'fotos-inspecoes');
 const MQTT_TOPIC_BASE = process.env.MQTT_TOPIC_RESULTADO || 'alcateia/teste/riodeserto/lista/piezometro'; 
 
@@ -57,9 +57,12 @@ function decodificarBuffer(valor) {
 }
 
 // --- SETUP INICIAL ---
-if (!WEBHOOK_URL) process.exit(1);
-if (!fs.existsSync(FOTOS_PATH)) fs.mkdirSync(FOTOS_PATH, { recursive: true });
+if (!fs.existsSync(FOTOS_PATH)) {
+    fs.mkdirSync(FOTOS_PATH, { recursive: true });
+    console.log(`📁 Pasta de fotos configurada em: ${path.resolve(FOTOS_PATH)}`);
+}
 
+// Buffers temporários
 let bufferLeituras = null;
 const bufferFotos = new Map();
 
@@ -68,35 +71,50 @@ console.log(`🔌 Conectando ao MQTT...`);
 const client = mqtt.connect(mqttOptions);
 
 client.on('connect', () => {
-    console.log('✅ Conectado ao HiveMQ (SSL)');
+    console.log('✅ Conectado ao Broker MQTT (SSL)');
+    
+    // Inscrição nos tópicos de entrada (Android -> BFF)
     client.subscribe('alcateia/teste/riodeserto/emcampo/leituras');
     client.subscribe('alcateia/teste/riodeserto/emcampo/fotos/#');
 
-    // --- AGENDAMENTO DIÁRIO ---
-    // Executa imediatamente ao iniciar para garantir dados frescos no boot
+    // Carga inicial de dados do banco para o aplicativo
     console.log('🚀 Executando carga inicial de dados...');
     consultarBancoPublicarMQTT();
 
-    // Agenda para rodar todo dia às 06:00:00
+    // Agenda para rodar todo dia às 06:00h
     cron.schedule('0 6 * * *', () => {
         console.log('⏰ Executando agendamento diário (06:00h)...');
         consultarBancoPublicarMQTT();
     }, {
         scheduled: true,
-        timezone: "America/Sao_Paulo" // Ajuste conforme a região do servidor
+        timezone: "America/Sao_Paulo"
     });
 });
 
 client.on('message', (topic, message) => {
+    // Evita processar mensagens que o próprio BFF publicou
     if (topic.startsWith(MQTT_TOPIC_BASE)) return;
+
     try {
         const payload = JSON.parse(message.toString());
-        if (topic.includes('leituras')) { bufferLeituras = payload; reiniciarTimeout(); }
-        else if (topic.includes('fotos')) { bufferFotos.set(topic.split('/').pop(), payload.fotoBase64); reiniciarTimeout(); }
-    } catch (e) {}
+        
+        if (topic.includes('leituras')) { 
+            console.log('📥 Lista de leituras recebida.');
+            bufferLeituras = payload; 
+            reiniciarTimeout(); 
+        }
+        else if (topic.includes('fotos')) { 
+            const id = topic.split('/').pop();
+            console.log(`📸 Foto recebida para o ID: ${id}`);
+            bufferFotos.set(id, payload.fotoBase64); 
+            reiniciarTimeout(); 
+        }
+    } catch (e) {
+        console.error("❌ Erro ao processar payload MQTT:", e.message);
+    }
 });
 
-// --- LÓGICA CONCILIAÇÃO ---
+// --- LÓGICA DE CONCILIAÇÃO (DEBOUNCE) ---
 let timeoutHandle = null;
 function reiniciarTimeout() {
     if (timeoutHandle) clearTimeout(timeoutHandle);
@@ -105,6 +123,9 @@ function reiniciarTimeout() {
 
 async function processarConciliacao() {
     if (!bufferLeituras) return;
+
+    console.log('🔄 Iniciando conciliação, salvamento físico e banco...');
+    
     const campo = bufferLeituras.Campo;
     const categorias = Object.keys(campo);
 
@@ -115,45 +136,57 @@ async function processarConciliacao() {
             for (const leitura of campo[cat]) {
                 let caminhoFotoFinal = null;
                 
+                // 1. Processamento da Foto (se existir no buffer)
                 if (bufferFotos.has(leitura.id)) {
                     const base64Data = bufferFotos.get(leitura.id);
                     const nomeArquivo = `${leitura.id}.jpg`;
                     const caminhoCompleto = path.join(path.resolve(FOTOS_PATH), nomeArquivo);
 
                     try {
+                        // Grava arquivo no disco
                         fs.writeFileSync(caminhoCompleto, Buffer.from(base64Data, 'base64'));
                         bufferFotos.delete(leitura.id);
                         caminhoFotoFinal = caminhoCompleto;
 
-                        // Salva no Postgres
-                        const cdPiezometroSalvar = leitura.CD_PIEZOMETRO ? leitura.CD_PIEZOMETRO : 0;
+                        // Salva registro da foto no Postgres
+                        const cdPiezometroSalvar = leitura.CD_PIEZOMETRO || 0;
                         try {
                             await pgPool.query(
                                 `INSERT INTO TB_FOTO_INSPECAO (CD_PIEZOMETRO, NM_ARQUIVO, CAMINHO_COMPLETO) VALUES ($1, $2, $3)`,
                                 [cdPiezometroSalvar, nomeArquivo, caminhoCompleto]
                             );
-                            console.log(`💾 Foto registrada no Postgres: ID ${cdPiezometroSalvar}`);
-                        } catch (pgErr) { console.error('❌ Erro Postgres:', pgErr.message); }
+                            console.log(`💾 Foto registrada no Postgres para CD: ${cdPiezometroSalvar}`);
+                        } catch (pgErr) { 
+                            console.error('❌ Erro Postgres:', pgErr.message); 
+                        }
 
-                    } catch (err) { console.error('❌ Erro arquivo:', err.message); }
+                    } catch (err) { 
+                        console.error('❌ Erro ao salvar arquivo:', err.message); 
+                    }
                 }
 
-                const infoAdicional = {
-                    comentario: leitura.observacao && leitura.observacao.trim() !== "" ? leitura.observacao : null,
-                    url: caminhoFotoFinal 
-                };
-                
-                leiturasAtualizadas.push({ ...leitura, observacao: JSON.stringify(infoAdicional) });
+                // 2. Ajuste do Objeto para o Webhook
+                // Removemos o campo 'foto' (base64) e tratamos a observação como string simples
+                const { foto, ...leituraLimpa } = leitura;
+
+                leiturasAtualizadas.push({ 
+                    ...leituraLimpa, 
+                    observacao: leitura.observacao && leitura.observacao.trim() !== "" ? leitura.observacao : null,
+                    caminho_imagem: caminhoFotoFinal 
+                });
             }
             campo[cat] = leiturasAtualizadas;
         }
     }
 
+    // Envia o objeto final para o n8n
     try {
         await axios.post(WEBHOOK_URL, bufferLeituras);
-        console.log('🚀 Webhook enviado.');
-        bufferLeituras = null;
-    } catch (error) { console.error('Erro webhook:', error.message); }
+        console.log('🚀 Webhook enviado com sucesso.');
+        bufferLeituras = null; // Limpa para a próxima carga
+    } catch (error) { 
+        console.error('❌ Erro ao enviar para o Webhook:', error.message); 
+    }
 }
 
 // --- BANCO DE DADOS (FIREBIRD -> MQTT) ---
@@ -196,7 +229,7 @@ function consultarBancoPublicarMQTT() {
         db.query(sqlQuery, (err, result) => {
             db.detach(); 
 
-            if (err) { console.error('❌ Erro Query:', err.message); return; }
+            if (err) { console.error('❌ Erro Query Firebird:', err.message); return; }
 
             if (result && result.length > 0) {
                 const dadosAgrupados = {};
@@ -229,7 +262,7 @@ function consultarBancoPublicarMQTT() {
                     console.log(`📡 Publicado: ${topico} (${dadosAgrupados[tipo].length} itens)`);
                 });
             } else {
-                console.log('⚠️ Consulta vazia.');
+                console.log('⚠️ Consulta Firebird vazia.');
             }
         });
     });
