@@ -16,16 +16,6 @@ RUN npm install --omit=dev
 # Copia o restante dos arquivos do projeto (index.js, etc)
 COPY . .
 
-# --- PADRONIZAÇÃO DA PASTA DE FOTOS ---
-# 1. Cria a pasta na raiz do container para facilitar o mapeamento
-RUN mkdir -p /fotos-inspecoes
-
-# 2. Define a variável de ambiente que o seu index.js irá ler
-ENV FOTOS_PATH=/fotos-inspecoes
-
-# 3. Define a pasta como um Volume para que as fotos persistam no Host
-VOLUME ["/fotos-inspecoes"]
-
 # Comando para iniciar a aplicação
 CMD [ "node", "index.js" ]
 

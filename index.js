@@ -12,11 +12,11 @@ const cron = require('node-cron');
 const WEBHOOK_URL = process.env.WEBHOOK_URL || 'http://192.168.100.95:5678/webhook/leituras-aplicativo';
 
 /**
- * AJUSTE DE CAMINHO (VOLUME DOCKER):
- * Priorizamos o caminho absoluto /fotos-inspecoes que é onde o volume da VPS é montado.
- * O path.resolve garante que o Node não tente criar pastas relativas ao projeto.
+ * FORÇANDO CAMINHO ABSOLUTO PARA O VOLUME
+ * O '/' no início é crucial para que o Node procure na raiz do container,
+ * onde o volume da VPS está montado.
  */
-const FOTOS_PATH = process.env.FOTOS_PATH || '/fotos-inspecoes';
+const FOTOS_PATH = '/fotos-inspecoes';
 
 const MQTT_TOPIC_BASE = process.env.MQTT_TOPIC_RESULTADO || 'alcateia/teste/riodeserto/lista/piezometro'; 
 
@@ -64,11 +64,13 @@ function decodificarBuffer(valor) {
 }
 
 // --- SETUP INICIAL ---
-// Garantimos que a pasta de fotos exista na raiz do container
+console.log("--- CONFIGURAÇÃO DE DIRETÓRIOS ---");
 if (!fs.existsSync(FOTOS_PATH)) {
     fs.mkdirSync(FOTOS_PATH, { recursive: true });
+    console.log(`📁 Pasta criada na raiz: ${FOTOS_PATH}`);
 }
-console.log(`📂 Volume de fotos ativo em: ${path.resolve(FOTOS_PATH)}`);
+console.log(`📍 O sistema salvará fotos em: ${path.resolve(FOTOS_PATH)}`);
+console.log("----------------------------------");
 
 // Buffers temporários
 let bufferLeituras = null;
@@ -109,7 +111,7 @@ client.on('message', (topic, message) => {
         }
         else if (topic.includes('fotos')) { 
             const id = topic.split('/').pop();
-            console.log(`📸 Foto recebida no MQTT para o ID: ${id}`);
+            console.log(`📸 Foto recebida (ID: ${id}) - Tamanho Base64: ${payload.fotoBase64?.length || 0}`);
             bufferFotos.set(id, payload.fotoBase64); 
             reiniciarTimeout(); 
         }
@@ -125,9 +127,12 @@ function reiniciarTimeout() {
 }
 
 async function processarConciliacao() {
-    if (!bufferLeituras) return;
+    if (!bufferLeituras) {
+        console.log("⏳ Aguardando lista de leituras para conciliar fotos...");
+        return;
+    }
 
-    console.log('🔄 Iniciando conciliação e salvamento no volume...');
+    console.log('🔄 Iniciando processamento de arquivos no volume...');
     
     const campo = bufferLeituras.Campo;
     const categorias = Object.keys(campo);
@@ -139,12 +144,9 @@ async function processarConciliacao() {
             for (const leitura of campo[cat]) {
                 let caminhoFotoFinal = null;
                 
-                // 1. Processamento da Foto
                 if (bufferFotos.has(leitura.id)) {
                     const base64Data = bufferFotos.get(leitura.id);
                     const nomeArquivo = `${leitura.id}.jpg`;
-                    
-                    // IMPORTANTE: Aqui garantimos o caminho absoluto para o volume
                     const caminhoCompleto = path.join(FOTOS_PATH, nomeArquivo);
 
                     try {
@@ -152,7 +154,7 @@ async function processarConciliacao() {
                         bufferFotos.delete(leitura.id);
                         caminhoFotoFinal = caminhoCompleto;
                         
-                        console.log(`💾 Foto salva com sucesso em: ${caminhoCompleto}`);
+                        console.log(`💾 ARQUIVO GRAVADO: ${caminhoCompleto}`);
 
                         const cdPiezometroSalvar = leitura.CD_PIEZOMETRO || 0;
                         try {
@@ -160,13 +162,13 @@ async function processarConciliacao() {
                                 `INSERT INTO TB_FOTO_INSPECAO (CD_PIEZOMETRO, NM_ARQUIVO, CAMINHO_COMPLETO) VALUES ($1, $2, $3)`,
                                 [cdPiezometroSalvar, nomeArquivo, caminhoCompleto]
                             );
-                            console.log(`✅ Registro DB Postgres OK (CD: ${cdPiezometroSalvar})`);
+                            console.log(`✅ Registro DB OK (CD: ${cdPiezometroSalvar})`);
                         } catch (pgErr) { 
                             console.error('❌ Erro Postgres:', pgErr.message); 
                         }
 
                     } catch (err) { 
-                        console.error('❌ Erro crítico ao gravar arquivo no volume:', err.message); 
+                        console.error('❌ ERRO AO ESCREVER NO VOLUME:', err.message); 
                     }
                 }
 
@@ -184,14 +186,14 @@ async function processarConciliacao() {
 
     try {
         await axios.post(WEBHOOK_URL, bufferLeituras);
-        console.log('🚀 Webhook (n8n) enviado com sucesso.');
+        console.log('🚀 Webhook (n8n) enviado.');
         bufferLeituras = null; 
     } catch (error) { 
-        console.error('❌ Erro ao enviar para o Webhook:', error.message); 
+        console.error('❌ Erro Webhook:', error.message); 
     }
 }
 
-// --- BANCO DE DADOS (FIREBIRD -> MQTT) ---
+// --- FUNÇÃO CONSULTA BANCO ---
 function consultarBancoPublicarMQTT() {
     const sqlQuery = `
         SELECT 
@@ -230,7 +232,7 @@ function consultarBancoPublicarMQTT() {
 
         db.query(sqlQuery, (err, result) => {
             db.detach(); 
-            if (err) { console.error('❌ Erro Query Firebird:', err.message); return; }
+            if (err) return;
 
             if (result && result.length > 0) {
                 const dadosAgrupados = {};
@@ -260,10 +262,7 @@ function consultarBancoPublicarMQTT() {
                 Object.keys(dadosAgrupados).forEach(tipo => {
                     const topico = `${MQTT_TOPIC_BASE}/${tipo}`;
                     client.publish(topico, JSON.stringify(dadosAgrupados[tipo]), { retain: true, qos: 1 });
-                    console.log(`📡 Publicado: ${topico} (${dadosAgrupados[tipo].length} itens)`);
                 });
-            } else {
-                console.log('⚠️ Consulta Firebird vazia.');
             }
         });
     });
