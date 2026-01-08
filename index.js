@@ -8,6 +8,8 @@ const iconv = require('iconv-lite');
 const { Pool } = require('pg');
 const cron = require('node-cron');
 
+app.use('/ver-fotos', express.static(FOTOS_PATH));
+
 // --- CONFIGURAÇÕES ---
 const WEBHOOK_URL = process.env.WEBHOOK_URL || 'http://192.168.100.95:5678/webhook/leituras-aplicativo';
 
