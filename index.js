@@ -10,7 +10,14 @@ const cron = require('node-cron');
 
 // --- CONFIGURAÇÕES ---
 const WEBHOOK_URL = process.env.WEBHOOK_URL || 'http://192.168.100.95:5678/webhook/leituras-aplicativo';
+
+/**
+ * AJUSTE DE CAMINHO (VOLUME DOCKER):
+ * Priorizamos o caminho absoluto /fotos-inspecoes que é onde o volume da VPS é montado.
+ * O path.resolve garante que o Node não tente criar pastas relativas ao projeto.
+ */
 const FOTOS_PATH = process.env.FOTOS_PATH || '/fotos-inspecoes';
+
 const MQTT_TOPIC_BASE = process.env.MQTT_TOPIC_RESULTADO || 'alcateia/teste/riodeserto/lista/piezometro'; 
 
 // Configuração Firebird
@@ -57,10 +64,11 @@ function decodificarBuffer(valor) {
 }
 
 // --- SETUP INICIAL ---
+// Garantimos que a pasta de fotos exista na raiz do container
 if (!fs.existsSync(FOTOS_PATH)) {
     fs.mkdirSync(FOTOS_PATH, { recursive: true });
-    console.log(`📁 Pasta de fotos configurada em: ${path.resolve(FOTOS_PATH)}`);
 }
+console.log(`📂 Volume de fotos ativo em: ${path.resolve(FOTOS_PATH)}`);
 
 // Buffers temporários
 let bufferLeituras = null;
@@ -73,15 +81,12 @@ const client = mqtt.connect(mqttOptions);
 client.on('connect', () => {
     console.log('✅ Conectado ao Broker MQTT (SSL)');
     
-    // Inscrição nos tópicos de entrada (Android -> BFF)
     client.subscribe('alcateia/teste/riodeserto/emcampo/leituras');
     client.subscribe('alcateia/teste/riodeserto/emcampo/fotos/#');
 
-    // Carga inicial de dados do banco para o aplicativo
     console.log('🚀 Executando carga inicial de dados...');
     consultarBancoPublicarMQTT();
 
-    // Agenda para rodar todo dia às 06:00h
     cron.schedule('0 6 * * *', () => {
         console.log('⏰ Executando agendamento diário (06:00h)...');
         consultarBancoPublicarMQTT();
@@ -92,7 +97,6 @@ client.on('connect', () => {
 });
 
 client.on('message', (topic, message) => {
-    // Evita processar mensagens que o próprio BFF publicou
     if (topic.startsWith(MQTT_TOPIC_BASE)) return;
 
     try {
@@ -105,7 +109,7 @@ client.on('message', (topic, message) => {
         }
         else if (topic.includes('fotos')) { 
             const id = topic.split('/').pop();
-            console.log(`📸 Foto recebida para o ID: ${id}`);
+            console.log(`📸 Foto recebida no MQTT para o ID: ${id}`);
             bufferFotos.set(id, payload.fotoBase64); 
             reiniciarTimeout(); 
         }
@@ -114,7 +118,6 @@ client.on('message', (topic, message) => {
     }
 });
 
-// --- LÓGICA DE CONCILIAÇÃO (DEBOUNCE) ---
 let timeoutHandle = null;
 function reiniciarTimeout() {
     if (timeoutHandle) clearTimeout(timeoutHandle);
@@ -124,7 +127,7 @@ function reiniciarTimeout() {
 async function processarConciliacao() {
     if (!bufferLeituras) return;
 
-    console.log('🔄 Iniciando conciliação, salvamento físico e banco...');
+    console.log('🔄 Iniciando conciliação e salvamento no volume...');
     
     const campo = bufferLeituras.Campo;
     const categorias = Object.keys(campo);
@@ -136,37 +139,37 @@ async function processarConciliacao() {
             for (const leitura of campo[cat]) {
                 let caminhoFotoFinal = null;
                 
-                // 1. Processamento da Foto (se existir no buffer)
+                // 1. Processamento da Foto
                 if (bufferFotos.has(leitura.id)) {
                     const base64Data = bufferFotos.get(leitura.id);
                     const nomeArquivo = `${leitura.id}.jpg`;
-                    const caminhoCompleto = path.join(path.resolve(FOTOS_PATH), nomeArquivo);
+                    
+                    // IMPORTANTE: Aqui garantimos o caminho absoluto para o volume
+                    const caminhoCompleto = path.join(FOTOS_PATH, nomeArquivo);
 
                     try {
-                        // Grava arquivo no disco
                         fs.writeFileSync(caminhoCompleto, Buffer.from(base64Data, 'base64'));
                         bufferFotos.delete(leitura.id);
                         caminhoFotoFinal = caminhoCompleto;
+                        
+                        console.log(`💾 Foto salva com sucesso em: ${caminhoCompleto}`);
 
-                        // Salva registro da foto no Postgres
                         const cdPiezometroSalvar = leitura.CD_PIEZOMETRO || 0;
                         try {
                             await pgPool.query(
                                 `INSERT INTO TB_FOTO_INSPECAO (CD_PIEZOMETRO, NM_ARQUIVO, CAMINHO_COMPLETO) VALUES ($1, $2, $3)`,
                                 [cdPiezometroSalvar, nomeArquivo, caminhoCompleto]
                             );
-                            console.log(`💾 Foto registrada no Postgres para CD: ${cdPiezometroSalvar}`);
+                            console.log(`✅ Registro DB Postgres OK (CD: ${cdPiezometroSalvar})`);
                         } catch (pgErr) { 
                             console.error('❌ Erro Postgres:', pgErr.message); 
                         }
 
                     } catch (err) { 
-                        console.error('❌ Erro ao salvar arquivo:', err.message); 
+                        console.error('❌ Erro crítico ao gravar arquivo no volume:', err.message); 
                     }
                 }
 
-                // 2. Ajuste do Objeto para o Webhook
-                // Removemos o campo 'foto' (base64) e tratamos a observação como string simples
                 const { foto, ...leituraLimpa } = leitura;
 
                 leiturasAtualizadas.push({ 
@@ -179,11 +182,10 @@ async function processarConciliacao() {
         }
     }
 
-    // Envia o objeto final para o n8n
     try {
         await axios.post(WEBHOOK_URL, bufferLeituras);
-        console.log('🚀 Webhook enviado com sucesso.');
-        bufferLeituras = null; // Limpa para a próxima carga
+        console.log('🚀 Webhook (n8n) enviado com sucesso.');
+        bufferLeituras = null; 
     } catch (error) { 
         console.error('❌ Erro ao enviar para o Webhook:', error.message); 
     }
@@ -228,7 +230,6 @@ function consultarBancoPublicarMQTT() {
 
         db.query(sqlQuery, (err, result) => {
             db.detach(); 
-
             if (err) { console.error('❌ Erro Query Firebird:', err.message); return; }
 
             if (result && result.length > 0) {
