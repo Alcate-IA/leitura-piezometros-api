@@ -155,7 +155,7 @@ async function processarConciliacao() {
 
                         await pgPool.query(
                             `INSERT INTO TB_FOTO_INSPECAO (CD_PIEZOMETRO, NM_ARQUIVO, CAMINHO_COMPLETO) VALUES ($1, $2, $3)`,
-                            [leitura.CD_PIEZOMETRO || 0, nomeArquivo, caminhoCompleto]
+                            [leitura.CD_PIEZOMETRO || 0, nomeArquivo, urlFotoFinal]
                         );
                     } catch (err) { 
                         console.error('❌ Erro ao salvar:', err.message); 
