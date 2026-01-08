@@ -21,6 +21,7 @@
   "dependencies": {
     "axios": "^1.13.2",
     "dotenv": "^17.2.3",
+    "express": "^5.2.1",
     "fs": "^0.0.1-security",
     "iconv-lite": "^0.7.1",
     "mqtt": "^5.14.1",

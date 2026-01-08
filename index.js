@@ -7,20 +7,31 @@ const Firebird = require('node-firebird');
 const iconv = require('iconv-lite'); 
 const { Pool } = require('pg');
 const cron = require('node-cron');
+const express = require('express'); // Adicionado Express
 
-app.use('/ver-fotos', express.static(FOTOS_PATH));
+const app = express();
+const PORTA_API = process.env.PORTA_CONTAINER || 3001;
+const IP_VPS = process.env.IP_VPS || '192.168.100.95'; // Configure seu IP no .env
 
 // --- CONFIGURAÇÕES ---
 const WEBHOOK_URL = process.env.WEBHOOK_URL || 'http://192.168.100.95:5678/webhook/leituras-aplicativo';
-
-/**
- * FORÇANDO CAMINHO ABSOLUTO PARA O VOLUME
- * O '/' no início é crucial para que o Node procure na raiz do container,
- * onde o volume da VPS está montado.
- */
 const FOTOS_PATH = '/fotos-inspecoes';
-
 const MQTT_TOPIC_BASE = process.env.MQTT_TOPIC_RESULTADO || 'alcateia/teste/riodeserto/lista/piezometro'; 
+
+// --- SERVIDOR WEB (EXPOSIÇÃO DE FOTOS) ---
+// Isso permite acessar: http://IP_DA_VPS:3000/ver-fotos/ID_DA_FOTO.jpg
+app.use('/ver-fotos', express.static(FOTOS_PATH));
+
+app.get('/status', (req, res) => {
+    res.json({ status: "online", fotos_path: FOTOS_PATH });
+});
+
+app.listen(PORTA_API, '0.0.0.0', () => {
+    console.log(`--------------------------------------------------`);
+    console.log(`🌐 Servidor Web Ativo na porta ${PORTA_API}`);
+    console.log(`📸 Fotos acessíveis em: http://${IP_VPS}:${PORTA_API}/ver-fotos/`);
+    console.log(`--------------------------------------------------`);
+});
 
 // Configuração Firebird
 const dbOptionsFirebird = {
@@ -66,13 +77,9 @@ function decodificarBuffer(valor) {
 }
 
 // --- SETUP INICIAL ---
-console.log("--- CONFIGURAÇÃO DE DIRETÓRIOS ---");
 if (!fs.existsSync(FOTOS_PATH)) {
     fs.mkdirSync(FOTOS_PATH, { recursive: true });
-    console.log(`📁 Pasta criada na raiz: ${FOTOS_PATH}`);
 }
-console.log(`📍 O sistema salvará fotos em: ${path.resolve(FOTOS_PATH)}`);
-console.log("----------------------------------");
 
 // Buffers temporários
 let bufferLeituras = null;
@@ -84,41 +91,31 @@ const client = mqtt.connect(mqttOptions);
 
 client.on('connect', () => {
     console.log('✅ Conectado ao Broker MQTT (SSL)');
-    
     client.subscribe('alcateia/teste/riodeserto/emcampo/leituras');
     client.subscribe('alcateia/teste/riodeserto/emcampo/fotos/#');
-
-    console.log('🚀 Executando carga inicial de dados...');
     consultarBancoPublicarMQTT();
 
     cron.schedule('0 6 * * *', () => {
-        console.log('⏰ Executando agendamento diário (06:00h)...');
         consultarBancoPublicarMQTT();
-    }, {
-        scheduled: true,
-        timezone: "America/Sao_Paulo"
-    });
+    }, { scheduled: true, timezone: "America/Sao_Paulo" });
 });
 
 client.on('message', (topic, message) => {
     if (topic.startsWith(MQTT_TOPIC_BASE)) return;
-
     try {
         const payload = JSON.parse(message.toString());
-        
         if (topic.includes('leituras')) { 
-            console.log('📥 Lista de leituras recebida.');
             bufferLeituras = payload; 
             reiniciarTimeout(); 
         }
         else if (topic.includes('fotos')) { 
             const id = topic.split('/').pop();
-            console.log(`📸 Foto recebida (ID: ${id}) - Tamanho Base64: ${payload.fotoBase64?.length || 0}`);
+            console.log(`📸 Foto recebida (ID: ${id})`);
             bufferFotos.set(id, payload.fotoBase64); 
             reiniciarTimeout(); 
         }
     } catch (e) {
-        console.error("❌ Erro ao processar payload MQTT:", e.message);
+        console.error("❌ Erro payload MQTT:", e.message);
     }
 });
 
@@ -129,22 +126,17 @@ function reiniciarTimeout() {
 }
 
 async function processarConciliacao() {
-    if (!bufferLeituras) {
-        console.log("⏳ Aguardando lista de leituras para conciliar fotos...");
-        return;
-    }
+    if (!bufferLeituras) return;
 
-    console.log('🔄 Iniciando processamento de arquivos no volume...');
-    
+    console.log('🔄 Iniciando conciliação e salvamento físico...');
     const campo = bufferLeituras.Campo;
     const categorias = Object.keys(campo);
 
     for (const cat of categorias) {
         if (campo[cat]) {
             const leiturasAtualizadas = [];
-            
             for (const leitura of campo[cat]) {
-                let caminhoFotoFinal = null;
+                let urlFotoFinal = null;
                 
                 if (bufferFotos.has(leitura.id)) {
                     const base64Data = bufferFotos.get(leitura.id);
@@ -154,32 +146,26 @@ async function processarConciliacao() {
                     try {
                         fs.writeFileSync(caminhoCompleto, Buffer.from(base64Data, 'base64'));
                         bufferFotos.delete(leitura.id);
-                        caminhoFotoFinal = caminhoCompleto;
                         
-                        console.log(`💾 ARQUIVO GRAVADO: ${caminhoCompleto}`);
+                        // Caminho Web para ser usado no Webhook e Frontend
+                        urlFotoFinal = `http://${IP_VPS}:${PORTA_API}/ver-fotos/${nomeArquivo}`;
+                        
+                        console.log(`💾 ARQUIVO SALVO: ${caminhoCompleto}`);
+                        console.log(`🔗 URL GERADA: ${urlFotoFinal}`);
 
-                        const cdPiezometroSalvar = leitura.CD_PIEZOMETRO || 0;
-                        try {
-                            await pgPool.query(
-                                `INSERT INTO TB_FOTO_INSPECAO (CD_PIEZOMETRO, NM_ARQUIVO, CAMINHO_COMPLETO) VALUES ($1, $2, $3)`,
-                                [cdPiezometroSalvar, nomeArquivo, caminhoCompleto]
-                            );
-                            console.log(`✅ Registro DB OK (CD: ${cdPiezometroSalvar})`);
-                        } catch (pgErr) { 
-                            console.error('❌ Erro Postgres:', pgErr.message); 
-                        }
-
+                        await pgPool.query(
+                            `INSERT INTO TB_FOTO_INSPECAO (CD_PIEZOMETRO, NM_ARQUIVO, CAMINHO_COMPLETO) VALUES ($1, $2, $3)`,
+                            [leitura.CD_PIEZOMETRO || 0, nomeArquivo, caminhoCompleto]
+                        );
                     } catch (err) { 
-                        console.error('❌ ERRO AO ESCREVER NO VOLUME:', err.message); 
+                        console.error('❌ Erro ao salvar:', err.message); 
                     }
                 }
 
                 const { foto, ...leituraLimpa } = leitura;
-
                 leiturasAtualizadas.push({ 
                     ...leituraLimpa, 
-                    observacao: leitura.observacao && leitura.observacao.trim() !== "" ? leitura.observacao : null,
-                    caminho_imagem: caminhoFotoFinal 
+                    caminho_imagem: urlFotoFinal // Agora envia a URL para o Webhook
                 });
             }
             campo[cat] = leiturasAtualizadas;
@@ -188,14 +174,13 @@ async function processarConciliacao() {
 
     try {
         await axios.post(WEBHOOK_URL, bufferLeituras);
-        console.log('🚀 Webhook (n8n) enviado.');
+        console.log('🚀 Webhook (n8n) enviado com sucesso.');
         bufferLeituras = null; 
     } catch (error) { 
         console.error('❌ Erro Webhook:', error.message); 
     }
 }
 
-// --- FUNÇÃO CONSULTA BANCO ---
 function consultarBancoPublicarMQTT() {
     const sqlQuery = `
         SELECT 
@@ -221,51 +206,34 @@ function consultarBancoPublicarMQTT() {
             P.FG_SITUACAO = 'A' 
             AND P.CD_EMPRESA = '18'
         GROUP BY 
-            P.CD_PIEZOMETRO, 
-            P.ID_PIEZOMETRO, 
-            P.NM_PIEZOMETRO,
-            P.TP_PIEZOMETRO,
-            P.FG_SITUACAO, 
-            P.CD_EMPRESA
+            P.CD_PIEZOMETRO, P.ID_PIEZOMETRO, P.NM_PIEZOMETRO,
+            P.TP_PIEZOMETRO, P.FG_SITUACAO, P.CD_EMPRESA
     `;
 
     Firebird.attach(dbOptionsFirebird, (err, db) => {
-        if (err) { console.error('❌ Erro Firebird:', err.message); return; }
-
+        if (err) return;
         db.query(sqlQuery, (err, result) => {
             db.detach(); 
-            if (err) return;
-
-            if (result && result.length > 0) {
-                const dadosAgrupados = {};
-
-                result.forEach(row => {
-                    const idDecodificado = decodificarBuffer(row.ID_RAW);
-                    const nmDecodificado = decodificarBuffer(row.NM_RAW);
-                    const tpDecodificado = decodificarBuffer(row.TP_RAW);
-                    const fgDecodificado = decodificarBuffer(row.FG_RAW);
-
-                    const objetoLimpo = {
-                        CD_PIEZOMETRO: row.CD_PIEZOMETRO,
-                        ID_PIEZOMETRO: idDecodificado,
-                        NM_PIEZOMETRO: nmDecodificado,
-                        TP_PIEZOMETRO: tpDecodificado,
-                        CD_EMPRESA: row.CD_EMPRESA,
-                        FG_SITUACAO: fgDecodificado,
-                        DT_INSPECAO: row.DT_INSPECAO,
-                        QT_LEITURA: row.QT_LEITURA
-                    };
-
-                    const tipo = tpDecodificado || 'OUTROS';
-                    if (!dadosAgrupados[tipo]) dadosAgrupados[tipo] = [];
-                    dadosAgrupados[tipo].push(objetoLimpo);
-                });
-
-                Object.keys(dadosAgrupados).forEach(tipo => {
-                    const topico = `${MQTT_TOPIC_BASE}/${tipo}`;
-                    client.publish(topico, JSON.stringify(dadosAgrupados[tipo]), { retain: true, qos: 1 });
-                });
-            }
+            if (err || !result) return;
+            const dadosAgrupados = {};
+            result.forEach(row => {
+                const objetoLimpo = {
+                    CD_PIEZOMETRO: row.CD_PIEZOMETRO,
+                    ID_PIEZOMETRO: decodificarBuffer(row.ID_RAW),
+                    NM_PIEZOMETRO: decodificarBuffer(row.NM_RAW),
+                    TP_PIEZOMETRO: decodificarBuffer(row.TP_RAW),
+                    CD_EMPRESA: row.CD_EMPRESA,
+                    FG_SITUACAO: decodificarBuffer(row.FG_RAW),
+                    DT_INSPECAO: row.DT_INSPECAO,
+                    QT_LEITURA: row.QT_LEITURA
+                };
+                const tipo = objetoLimpo.TP_PIEZOMETRO || 'OUTROS';
+                if (!dadosAgrupados[tipo]) dadosAgrupados[tipo] = [];
+                dadosAgrupados[tipo].push(objetoLimpo);
+            });
+            Object.keys(dadosAgrupados).forEach(tipo => {
+                client.publish(`${MQTT_TOPIC_BASE}/${tipo}`, JSON.stringify(dadosAgrupados[tipo]), { retain: true, qos: 1 });
+            });
         });
     });
 }
