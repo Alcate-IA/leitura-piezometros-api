@@ -10,7 +10,7 @@ const cron = require('node-cron');
 
 // --- CONFIGURAÇÕES ---
 const WEBHOOK_URL = process.env.WEBHOOK_URL || 'http://192.168.100.95:5678/webhook/leituras-aplicativo';
-const FOTOS_PATH = process.env.FOTOS_PATH || path.join(__dirname, 'fotos-inspecoes');
+const FOTOS_PATH = process.env.FOTOS_PATH || '/fotos-inspecoes';
 const MQTT_TOPIC_BASE = process.env.MQTT_TOPIC_RESULTADO || 'alcateia/teste/riodeserto/lista/piezometro'; 
 
 // Configuração Firebird

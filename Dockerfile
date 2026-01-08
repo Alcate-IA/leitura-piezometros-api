@@ -36,4 +36,4 @@ CMD [ "node", "index.js" ]
 #   -p 3000:3000 \
 #   -v /home/usuario/fotos-inspecoes:/fotos-inspecoes \
 #   --env-file .env \
-#   leitura-piezometros-apo
+#   leitura-piezometros-ap
