@@ -137,15 +137,16 @@ async function processarConciliacao() {
             const leiturasAtualizadas = [];
             for (const leitura of campo[cat]) {
                 let urlFotoFinal = null;
+                const leituraId = String(leitura.id);
                 
-                if (bufferFotos.has(leitura.id)) {
-                    const base64Data = bufferFotos.get(leitura.id);
-                    const nomeArquivo = `${leitura.id}.jpg`;
+                if (bufferFotos.has(leituraId)) {
+                    const base64Data = bufferFotos.get(leituraId);
+                    const nomeArquivo = `${leituraId}.jpg`;
                     const caminhoCompleto = path.join(FOTOS_PATH, nomeArquivo);
 
                     try {
                         fs.writeFileSync(caminhoCompleto, Buffer.from(base64Data, 'base64'));
-                        bufferFotos.delete(leitura.id);
+                        bufferFotos.delete(leituraId);
                         
                         // Caminho Web para ser usado no Webhook e Frontend
                         urlFotoFinal = `http://${IP_VPS}:${PORTA_API}/ver-fotos/${nomeArquivo}`;
@@ -165,7 +166,7 @@ async function processarConciliacao() {
                 const { foto, ...leituraLimpa } = leitura;
                 leiturasAtualizadas.push({ 
                     ...leituraLimpa, 
-                    caminho_imagem: urlFotoFinal // Agora envia a URL para o Webhook
+                    caminho_imagem: urlFotoFinal || leitura.caminho_imagem || null
                 });
             }
             campo[cat] = leiturasAtualizadas;
