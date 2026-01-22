@@ -128,8 +128,11 @@ function reiniciarTimeout() {
 async function processarConciliacao() {
     if (!bufferLeituras) return;
 
+    // Captura o objeto atual para garantir que processamos e enviamos o mesmo dado
+    const payloadEnvio = bufferLeituras;
+
     console.log('🔄 Iniciando conciliação e salvamento físico...');
-    const campo = bufferLeituras.Campo;
+    const campo = payloadEnvio.Campo;
     const categorias = Object.keys(campo);
 
     for (const cat of categorias) {
@@ -177,9 +180,14 @@ async function processarConciliacao() {
     }
 
     try {
-        await axios.post(WEBHOOK_URL, bufferLeituras);
+        console.log('📤 Payload enviado para o webhook:', JSON.stringify(payloadEnvio, null, 2));
+        await axios.post(WEBHOOK_URL, payloadEnvio);
         console.log('🚀 Webhook (n8n) enviado com sucesso.');
-        bufferLeituras = null; 
+        
+        // Limpa o buffer global apenas se ele ainda for o mesmo que processamos
+        if (bufferLeituras === payloadEnvio) {
+            bufferLeituras = null; 
+        }
     } catch (error) { 
         console.error('❌ Erro Webhook:', error.message); 
     }
