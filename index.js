@@ -138,11 +138,11 @@ async function processarConciliacao() {
             for (const leitura of campo[cat]) {
                 let urlFotoFinal = null;
                 const leituraId = String(leitura.id);
+                const nomeArquivo = `${leituraId}.jpg`;
+                const caminhoCompleto = path.join(FOTOS_PATH, nomeArquivo);
                 
                 if (bufferFotos.has(leituraId)) {
                     const base64Data = bufferFotos.get(leituraId);
-                    const nomeArquivo = `${leituraId}.jpg`;
-                    const caminhoCompleto = path.join(FOTOS_PATH, nomeArquivo);
 
                     try {
                         fs.writeFileSync(caminhoCompleto, Buffer.from(base64Data, 'base64'));
@@ -161,6 +161,9 @@ async function processarConciliacao() {
                     } catch (err) { 
                         console.error('❌ Erro ao salvar:', err.message); 
                     }
+                } else if (fs.existsSync(caminhoCompleto)) {
+                    // Se a foto já existe no disco, gera a URL mesmo sem estar no buffer
+                    urlFotoFinal = `http://${IP_VPS}:${PORTA_API}/ver-fotos/${nomeArquivo}`;
                 }
 
                 const { foto, ...leituraLimpa } = leitura;
